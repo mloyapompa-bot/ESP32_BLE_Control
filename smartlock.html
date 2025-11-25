@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Smart Lock - Web Bluetooth</title>
+<style>
+  :root{--bg:#0f0f10;--card:#161617;--muted:#9aa0a6;--accent-open:#00c853;--accent-close:#d32f2f;}
+  body{margin:0;font-family:Segoe UI,Roboto,Arial;background:var(--bg);color:#fff;display:flex;align-items:flex-start;justify-content:center;padding:18px;}
+  .container{max-width:980px;width:100%;}
+  .title{font-size:24px;text-align:center;margin-bottom:12px;font-weight:700;}
+  .frame{background:var(--card);border-radius:12px;padding:16px;display:flex;gap:16px;}
+  .left,.right{flex:1;display:flex;flex-direction:column;gap:12px;}
+  .statusIcon{font-size:48px;text-align:center;}
+  .bigLabel{font-size:16px;text-align:center;}
+  .miniLog,.activityLog{background:#0d0d0d;border-radius:6px;padding:8px;color:var(--muted);min-height:80px;max-height:180px;overflow:auto;}
+  .buttons{display:flex;gap:8px;justify-content:center;}
+  button{padding:12px;border-radius:10px;border:0;color:#fff;font-weight:700;cursor:pointer;}
+  #openBtn{background:var(--accent-open);}
+  #closeBtn{background:var(--accent-close);}
+  .controlRow{display:flex;gap:8px;align-items:center;}
+  label{font-size:14px;color:var(--muted);}
+  select{background:#1f1f1f;padding:6px;border-radius:6px;color:#fff;border:0;}
+  #connectBtn{padding:10px;border-radius:8px;background:#3a3a3a;border:0;color:#fff;}
+  .small{font-size:12px;color:var(--muted);}
+</style>
+</head>
+<body>
+  <div class="container">
+    <div class="title">Smart Lock</div>
+    <div class="frame">
+      <div class="left">
+        <div class="statusIcon" id="lockIcon">❔</div>
+        <div class="bigLabel" id="stateLabel">Status: UNKNOWN</div>
+        <div class="small" id="lastChange">Last change: --/--/---- --:--</div>
+
+        <div class="buttons">
+          <button id="openBtn">🔓 Open</button>
+          <button id="closeBtn">🔒 Close</button>
+        </div>
+
+        <div>
+          <div style="margin-bottom:6px">Log:</div>
+          <div class="miniLog" id="miniLog"></div>
+        </div>
+      </div>
+
+      <div class="right">
+        <div class="controlRow">
+          <label>BLE Device:</label>
+          <button id="connectBtn">Conectar</button>
+        </div>
+
+        <div class="small" id="deviceLabel">Device: Not connected</div>
+
+        <div style="margin-top:8px">Activity:</div>
+        <div class="activityLog" id="activityLog"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(async () => {
+  // UUIDs (Nordic UART service)
+  const SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+  const RX_CHAR_UUID = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // write -> peripheral
+  const TX_CHAR_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // notify <- peripheral
+
+  let device = null;
+  let server = null;
+  let txChar = null;
+  let rxChar = null;
+
+  const lockIcon = document.getElementById('lockIcon');
+  const stateLabel = document.getElementById('stateLabel');
+  const lastChange = document.getElementById('lastChange');
+  const miniLog = document.getElementById('miniLog');
+  const activityLog = document.getElementById('activityLog');
+  const deviceLabel = document.getElementById('deviceLabel');
+  const connectBtn = document.getElementById('connectBtn');
+  const openBtn = document.getElementById('openBtn');
+  const closeBtn = document.getElementById('closeBtn');
+
+  function logMini(txt) {
+    const now = new Date().toLocaleTimeString();
+    miniLog.innerText += `[${now}] ${txt}\n`;
+    miniLog.scrollTop = miniLog.scrollHeight;
+  }
+  function logActivity(txt) {
+    const now = new Date().toLocaleString();
+    activityLog.innerText += `[${now}] ${txt}\n`;
+    activityLog.scrollTop = activityLog.scrollHeight;
+  }
+  function updateState(state) {
+    const now = new Date();
+    lastChange.innerText = `Last change: ${now.toLocaleDateString()} ${now.toLocaleTimeString()}`;
+    if (state === 'OPEN') {
+      stateLabel.innerText = 'Status: OPEN';
+      lockIcon.innerText = '🔓';
+    } else if (state === 'CLOSE' || state === 'CLOSED' || state === 'CLOSE') {
+      stateLabel.innerText = 'Status: CLOSED';
+      lockIcon.innerText = '🔒';
+    } else {
+      stateLabel.innerText = 'Status: UNKNOWN';
+      lockIcon.innerText = '❔';
+    }
+  }
+
+  async function connect() {
+    try {
+      logActivity('Solicitando dispositivo BLE...');
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{services: [SERVICE_UUID]}],
+        optionalServices: [SERVICE_UUID]
+      });
+      deviceLabel.innerText = `Device: ${device.name || device.id}`;
+      logActivity(`Conectando a ${device.name || device.id}...`);
+      device.addEventListener('gattserverdisconnected', onDisconnected);
+      server = await device.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE_UUID);
+      txChar = await service.getCharacteristic(TX_CHAR_UUID);
+      rxChar = await service.getCharacteristic(RX_CHAR_UUID);
+
+      // Start notifications from device -> this page
+      await txChar.startNotifications();
+      txChar.addEventListener('characteristicvaluechanged', handleNotifications);
+
+      connectBtn.innerText = 'Disconnect';
+      logActivity('Conectado');
+    } catch (err) {
+      logActivity('ERROR: ' + err);
+      console.error(err);
+    }
+  }
+
+  function onDisconnected() {
+    logActivity('Desconectado');
+    deviceLabel.innerText = 'Device: Not connected';
+    connectBtn.innerText = 'Conectar';
+    txChar = null; rxChar = null; server = null; device = null;
+  }
+
+  function handleNotifications(event) {
+    const value = new TextDecoder().decode(event.target.value);
+    logMini('LOCK: ' + value);
+    // normalize
+    const v = value.trim().toUpperCase();
+    if (v === 'OPEN') updateState('OPEN');
+    else if (v === 'CLOSE' || v === 'CLOSED') updateState('CLOSED');
+    else updateState('UNKNOWN');
+  }
+
+  async function sendCommand(cmd) {
+    if (!rxChar) {
+      logActivity('No conectado');
+      return;
+    }
+    try {
+      const data = new TextEncoder().encode(cmd + '\n');
+      await rxChar.writeValue(data);
+      logActivity('Sent ' + cmd);
+    } catch (err) {
+      logActivity('ERROR enviando: ' + err);
+      console.error(err);
+    }
+  }
+
+  // UI bindings
+  connectBtn.addEventListener('click', async () => {
+    if (device && device.gatt && device.gatt.connected) {
+      logActivity('Desconectando...');
+      device.gatt.disconnect();
+      onDisconnected();
+      return;
+    }
+    await connect();
+  });
+
+  openBtn.addEventListener('click', async () => {
+    updateState('OPEN'); // cambio inmediato UI
+    await sendCommand('OPEN');
+  });
+
+  closeBtn.addEventListener('click', async () => {
+    updateState('CLOSED');
+    await sendCommand('CLOSE');
+  });
+
+  // detect si Web Bluetooth está disponible
+  if (!navigator.bluetooth) {
+    logActivity('Web Bluetooth NO está disponible en tu navegador. Usa Chrome en Android.');
+    connectBtn.disabled = true;
+  }
+})();
+</script>
+</body>
+</html>
